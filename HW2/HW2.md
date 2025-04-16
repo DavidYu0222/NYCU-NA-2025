@@ -1,0 +1,367 @@
+# NYCU NA 2025 HW2
+
+#### Spec: https://nasa.cs.nycu.edu.tw/na/2025/slides/hw2.pdf
+
+#### OS: Debian 12.9.0
+
+---
+
+# Router
+
+##### Edit /etc/dhcp/dhcpd.conf
+```vim=
+host ns1 {
+    hardware ethernet <Authoritative DNS Server MAC Addr>;
+    fixed-address 192.168.4.53;
+}
+
+host dns {
+    hardware ethernet <Resolver MAC Addr>;
+    fixed-address 192.168.4.153;
+}
+```
+# Authoritative DNS Server
+
+#### Edit /etc/network/interfaces
+
+```vim=
+auto enp0s3
+iface enp0s3 inet dhcp
+```
+
+#### Edit /etc/hosts
+
+```vim=
+192.168.4.53 ns1.4.nasa ns1
+```
+
+
+## BIND9
+```bash
+sudo apt install bind9 bind9utils bind9-doc
+```
+
+#### Edit /etc/bind/named.conf.local
+
+```vim=
+zone "4.nasa" {
+    type master;
+    file "/var/cache/bind/db.4.nasa.signed";
+};
+
+zone "4.168.192.in-addr.arpa" {
+    type master;
+    file "/var/cache/bind/db.192.168.4.signed";
+};
+```
+        
+#### Create /var/cache/bind/db.4.nasa
+```vim=
+$TTL 86400
+$ORIGIN 4.nasa.
+@      IN    SOA  ns1.4.nasa. admin.4.nasa. (
+            2025031501  ; Serial
+            3600        ; Refresh
+            1800        ; Retry
+            604800      ; Expire
+            86400 )     ; Minimum TTL
+       IN    NS   ns1.4.nasa.
+whoami IN    A    10.113.4.1
+dns    IN    A    192.168.4.153
+ns1    IN    A    192.168.4.53
+
+$INCLUDE "/var/cache/bind/K4.nasa.+013+<ZSK_ID>.key"
+$INCLUDE "/var/cache/bind/K4.nasa.+013+<KSK_ID>.key"
+```
+
+#### Create /var/cache/bind/db.192.168.4
+
+```vim=
+$TTL 86400
+$ORIGIN 4.168.192.in-addr.arpa.
+@   IN  SOA  ns1.4.nasa. admin.4.nasa. (
+            2025031501  ; Serial
+            3600        ; Refresh
+            1800        ; Retry
+            604800      ; Expire
+            86400 )     ; Minimum TTL
+    IN  NS   ns1.4.nasa.
+53  IN  PTR  ns1.4.nasa.
+153 IN  PTR  dns.4.nasa.
+
+$INCLUDE "/var/cache/bind/K4.168.192.in-addr.arpa.+013+<ZSK_ID>.key"
+$INCLUDE "/var/cache/bind/K4.168.192.in-addr.arpa.+013+<KSK_ID>.key"
+```
+
+#### Edit /etc/bind/named.conf.options
+
+```vim=
+options {
+    directory "/var/cache/bind";
+    recursion no;
+    dnssec-validation yes;
+};
+```
+
+### Generate Keys
+>Note: Each zone need two key pairs (ZSK and KSK)
+```bash
+cd /var/cache/bind
+sudo dnssec-keygen -a ECDSAP256SHA256 -n ZONE 4.nasa            //ZSK key pair
+#    generate    K4.nasa.+013+40880.key  K4.nasa.+013+40880.private
+sudo dnssec-keygen -a ECDSAP256SHA256 -n ZONE -f KSK 4.nasa     //KSK key pair
+#    generate    K4.nasa.+013+04063.key  K4.nasa.+013+04063.private
+```
+
+```bash
+sudo dnssec-keygen -a ECDSAP256SHA256 -n ZONE 4.168.192.in-addr.arpa           //ZSK key pair
+#    generate    K4.168.192.in-addr.arpa.+013+07944.key  K4.168.192.in-addr.arpa.+013+07944.private
+sudo dnssec-keygen -a ECDSAP256SHA256 -n ZONE -f KSK 4.168.192.in-addr.arpa    //KSK key pair
+#    generate    K4.168.192.in-addr.arpa.+013+29919.key  K4.168.192.in-addr.arpa.+013+29919.private
+```
+
+### Permissions
+
+```bash
+sudo chown bind:bind /var/cache/bind/db.4.nasa
+sudo chown bind:bind /var/cache/bind/db.192.168.4
+sudo chown bind:bind /var/cache/bind/*.key
+sudo chown bind:bind /var/cache/bind/*.private
+```
+
+### Sign Zones
+
+```bash
+sudo dnssec-signzone -g -o 4.nasa -k K4.nasa.+013+<KSK_ID>.key db.4.nasa K4.nasa.+013+<ZSK_ID>.key
+#    generate    db.4.nasa.signed        dsset-4.nasa
+sudo dnssec-signzone -g -o 4.168.192.in-addr.arpa -k K4.168.192.in-addr.arpa.+013+<KSK_ID>.key db.4.168.192 K4.168.192.in-addr.arpa.+013+<ZSK_ID>.key
+#    generate    db.4.168.192.signed     dsset-4.168.192.in-addr.arpa
+```
+>Note: Remember to resign the zone if you change anything in `db.4.nasa`/`db.4.168.192`
+
+### Upload the DS Record to judge
+```bash
+cat dsset-4.nasa
+    4.nasa.			IN DS 4063 13 2 64620A9065D9CF750FEB49F699B2E510D93FB50620AA6BF891FADCBB E6D05367
+cat dsset-4.168.192.in-addr.arpa
+    4.168.192.in-addr.arpa.	IN DS 29919 13 2 C7A9A9260C07BFFF2FEBC811CD3FED8C2581D26FCC95B156B85DB441 2C9086E1
+```
+>Note: Remember to delete the "space" in digest zone
+
+### For debug
+```bash
+sudo named-checkconf /etc/bind/named.conf
+sudo named-checkzone 4.nasa /var/cache/bind/db.4.nasa
+sudo named-checkzone 4.168.192.in-addr.arpa /var/cache/bind/db.192.168.4
+sudo systemctl restart bind9
+sudo systemctl status bind9
+sudo journalctl -u named
+```
+
+# Resolver
+
+#### Edit /etc/network/interfaces
+
+```vim=
+auto enp0s3
+iface enp0s3 inet dhcp
+```
+
+#### Edit /etc/hosts
+
+```vim=
+192.168.4.153 dns.4.nasa dns
+```
+
+## BIND9
+
+```bash=
+sudo apt install bind9 bind9utils bind9-doc
+```
+
+#### Edit /etc/bind/named.conf.local
+
+```vim=
+trust-anchors {
+    "nasa."                 static-key 257 3 13 "<digest> (you can dig @192.168.254.3 DNSKEY nasa.)";
+    "168.192.in-addr.arpa." static-key 257 3 13 "<digest> (you can dig @192.168.254.3 DNSKEY 168.192.in-addr.arpa. )";
+};
+
+zone "nasa." {
+    type forward;       
+    forward first;      # Prioritize using forwarders { DNS servers } for domain name resolution
+    forwarders { 192.168.254.3; };
+};
+
+zone "168.192.in-addr.arpa." {
+    type forward;
+    forward first;
+    forwarders { 192.168.254.3; };
+};
+
+# DoT (Certificate is generated by judge)
+tls local-tls {
+    cert-file "/etc/bind/dns.crt";
+    key-file "/etc/bind/dns.key";
+};
+```
+
+#### Edit /etc/bind/named.conf.options
+
+```vim=
+options {
+    directory "/var/cache/bind";
+    allow-query { any; };                       # [Important!] Without setting it, judge cannot use this resolver (refused).
+    forwarders { 1.1.1.1; };
+    listen-on port 53 { any; };
+    listen-on port 853 tls local tls { any; };  # DoT
+    dnssec-validation yes;                      # enable it if dnssec on nameserver has done; otherwise disable it
+    empty-zones-enable no;                      # prevent server from sending unnecessary queries to Internet servers
+}
+```
+
+## Unbound (another choice)
+
+#### Edit  /etc/unbound/unbound.conf
+
+```vim=
+server:
+    interface: 127.0.0.1
+    interface: 192.168.4.153
+    interface: 192.168.4.153@853
+
+    tls-port: 853
+    tls-service-pem: "/etc/unbound/dns.4.nasa.crt"
+    tls-service-key: "/etc/unbound/dns.4.nasa.key"
+
+    access-control: 0.0.0.0 allow
+
+    do-ip4: yes
+    do-ip6: no
+
+    harden-dnssec-stripped: yes	
+    trust-anchor-signaling: yes	
+
+    unblock-lan-zones: yes
+    domain-insecure: "nasa."
+    domain-insecure: "4.168.192.in-addr.arpa."
+
+    verbosity: 2
+
+stub-zone:
+    name: "nasa."
+    stub-addr: 192.168.254.3
+
+stub-zone:
+    name: "168.192.in-addr.arpa."
+    stub-addr: 192.168.254.3
+
+stub-zone:
+    name: "4.168.192.in-addr.arpa."
+    stub-addr: 192.168.4.53
+
+forward-zone: 
+    name: "."
+    forward-addr: 1.1.1.1
+```
+
+#### For Debug
+
+```bash
+sudo systemctl restart unbound
+sudo systemctl status unbound
+sudo journalctl -u unbound
+```
+
+## DNSDIST (DoH)
+
+```bash
+sudo apt install dnsdist
+```
+
+#### Edit /etc/dnsdist/dnsdist.conf
+
+```vim=
+# define BIND9 as the upstream server
+newServer( { address="127.0.0.1:53" } )   
+# Configure DoH on port 443 (Certificate is generated by judge)    
+addDOHLocal('192.168.4.153:443', '/etc/dnsdist/dns.crt', '/etc/dnsdist/dns.key', '/dns-query')
+```
+
+#### Permissions
+
+```bash
+sudo chown root:_dnsdist /etc/dnsdist/dns.crt
+sudo chown root:_dnsdist /etc/dnsdist/dns.key
+sudo chmod 644 dns.crt
+sudo chmod 640 dns.key
+```
+
+#### For Debug
+
+```bash
+sudo dnsdist --check-conf
+sudo systemctl restart dnsdist
+sudo systemctl status dnsdist
+```
+
+## Test Service
+
+1. Basic DNS Resolution On DNS
+    ```bash
+    dig @192.168.4.53 4.nasa. NS
+    dig @192.168.4.53 whoami.4.nasa. A
+    dig @192.168.4.53 dns.4.nasa. A
+    dig @192.168.4.53 ns1.4.nasa. A
+
+    dig @192.168.4.53 -x 192.168.4 NS
+    dig @192.168.4.53 -x 192.168.4.53 PTR
+    dig @192.168.4.53 -x 192.168.4.153 PTR
+    ```
+    > Answer: NOERROR
+    ```bash
+    dig @192.168.4.153 google.com A
+    ```
+    > Answer: REFUSED
+
+2. Basic DNS Resolution On Resolver
+    ```bash
+    dig @192.168.4.153 4.nasa. NS
+    dig @192.168.4.153 whoami.4.nasa. A
+    dig @192.168.4.153 dns.4.nasa. A
+    dig @192.168.4.153 ns1.4.nasa. A
+
+    dig @192.168.4.153 -x 192.168.4 NS
+    dig @192.168.4.153 -x 192.168.4.53 PTR
+    dig @192.168.4.153 -x 192.168.4.153 PTR
+
+    dig @192.168.4.153 google.com A
+    ```
+    >Answer: NOERROR
+
+3. Test DNSSEC Validation
+    ```bash
+    dig @192.168.4.153 whoami.4.nasa A +dnssec
+    ```
+    > Answer: NOERROR
+                The response should include `RRSIG` records in the answer section.
+                Look for the `ad` (Authenticated Data) flag
+    * Check Trust chain
+    ```bash
+    dig @192.168.4.153 nasa. DNSKEY
+    dig @192.168.4.153 4.nasa. DS
+    dig @192.168.4.153 4.nasa. DNSKEY
+    dig @192.168.4.153 whoami.4.nasa A
+    ```
+    
+4. Test DoH (DNS over HTTPS)
+    ```bash
+    dig @192.168.4.153 whoami.4.nasa A +https
+    ```
+    > Answer: NOERROR, Server is 192.168.4.153#443 (HTTPS)
+        
+5. Test DoT (DNS over TLS)
+    ```bash
+    dig @192.168.4.153 whoami.4.nasa A +tls
+    ```
+    >Answer: NOERROR, Server is 192.168.4.153#853 (TLS)
